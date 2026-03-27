@@ -33,6 +33,7 @@ dependencies = [
     "zeroconf<1",
     "getmac<1",
     "types-protobuf",
+    "websockets>=16.0",
 ]
 
 [project.optional-dependencies]
