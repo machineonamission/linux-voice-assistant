@@ -188,6 +188,14 @@ async def main() -> None:
         action="store_true",
         help="Add this to enable debug logging",
     )
+    parser.add_argument(
+        "--volume-controller",
+        choices=["mpv", "pipewire"],
+        default="mpv",
+        help="Which program handles the master volume control. 'mpv' is old default, and compatible. "
+             "'pipewire' requires wpctl, but in general interfaces with USB audio devices and pipewire better. "
+             "Defaults to 'mpv'. Must be 'mpv' or 'pipewire'.",
+    )
     args = parser.parse_args()
 
     if args.list_input_devices:
@@ -388,6 +396,8 @@ async def main() -> None:
         download_dir=args.download_dir,
         volume=initial_volume,
         timer_max_ring_seconds=args.timer_max_ring_seconds,
+        volume_controller=args.volume_controller,
+        audio_output_device=args.audio_output_device
     )
 
     if args.enable_thinking_sound:
