@@ -184,6 +184,11 @@ async def main() -> None:
         help="Seconds before a ringing timer auto-stops (default: 900)",
     )
     parser.add_argument(
+        "--listen-during-wake-sound",
+        action="store_true",
+        help="Start listening immediately after wake word detection, without waiting for the wake sound to finish",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Add this to enable debug logging",
@@ -385,7 +390,7 @@ async def main() -> None:
         tts_player=MpvMediaPlayer(device=args.audio_output_device),
         wakeup_sound=args.wakeup_sound,
         start_listening_sound=args.start_listening_sound,
-        
+
         timer_finished_sound=args.timer_finished_sound,
         processing_sound=args.processing_sound,
         mute_sound=args.mute_sound,
@@ -396,6 +401,7 @@ async def main() -> None:
         download_dir=args.download_dir,
         volume=initial_volume,
         timer_max_ring_seconds=args.timer_max_ring_seconds,
+        listen_during_wake_sound=args.listen_during_wake_sound,
         volume_controller=args.volume_controller,
         audio_output_device=args.audio_output_device
     )
