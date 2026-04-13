@@ -237,7 +237,6 @@ class MediaPlayerEntity(ESPHomeEntity):
                         lambda: self._safe_send_state(MediaPlayerState.PAUSED),
                         done_callback,
                     ),
-                    done_callback=lambda: call_all(self.music_player.resume, done_callback),
                 )
             else:
                 # Nothing was playing, just announce then go idle
@@ -251,10 +250,6 @@ class MediaPlayerEntity(ESPHomeEntity):
                 )
         else:
             # Music playback
-            self.music_player.play(
-                url,
-                done_callback=lambda: call_all(
-                    lambda: self._safe_send_state(MediaPlayerState.IDLE),
             self._log.debug("PLAY: announcement false")
             # Music
             self.music_player.play(
