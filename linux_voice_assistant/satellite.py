@@ -5,6 +5,7 @@ import hashlib
 import logging
 import posixpath
 import shutil
+import threading
 import time
 from collections.abc import Iterable
 from typing import Dict, List, Optional, Set, Union
@@ -19,6 +20,8 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     ListEntitiesDoneResponse,
     ListEntitiesRequest,
     MediaPlayerCommandRequest,
+    NumberCommandRequest,
+    SelectCommandRequest,
     SubscribeHomeAssistantStatesRequest,
     SwitchCommandRequest,
     VoiceAssistantAnnounceFinished,
@@ -44,7 +47,7 @@ from pymicro_wakeword import MicroWakeWord
 from pyopen_wakeword import OpenWakeWord
 
 from .api_server import APIServer
-from .entity import MediaPlayerEntity, MuteSwitchEntity, ThinkingSoundEntity
+from .entity import MediaPlayerEntity, MicSettingEntity, MuteSwitchEntity, ThinkingSoundEntity
 from .models import AvailableWakeWord, ServerState, WakeWordType
 from .peripheral_api import LVAEvent
 from .util import call_all
@@ -55,13 +58,22 @@ PROTO_TO_MESSAGE_TYPE = {v: k for k, v in MESSAGE_TYPE_TO_PROTO.items()}
 
 
 class VoiceSatelliteProtocol(APIServer):
-
     def __init__(self, state: ServerState) -> None:
         super().__init__(state.name)
 
         self.state = state
         self.state.satellite = self
         self.state.connected = False
+
+        # Report capabilities appropriately
+        if state.output_only:
+            _LOGGER.debug("Output only features")
+            self.supported_features = VoiceAssistantFeature.API_AUDIO | VoiceAssistantFeature.ANNOUNCE
+        else:
+            _LOGGER.debug("Voice assistant features")
+            self.supported_features = (
+                VoiceAssistantFeature.VOICE_ASSISTANT | VoiceAssistantFeature.API_AUDIO | VoiceAssistantFeature.ANNOUNCE | VoiceAssistantFeature.START_CONVERSATION | VoiceAssistantFeature.TIMERS
+            )
 
         existing_media_players = [
             entity
@@ -168,6 +180,81 @@ class VoiceSatelliteProtocol(APIServer):
             self._set_thinking_sound_enabled
         )
         thinking_sound_switch.sync_with_state()
+
+        # Mic Gain
+        if self.state.mic_gain_entity is None:
+            self.state.mic_gain_entity = MicSettingEntity(
+                server=self,
+                key=len(self.state.entities),
+                name="Mic Auto Gain",
+                object_id="mic_gain",
+                min_value=0.0,
+                max_value=31.0,
+                get_value=lambda: float(self.state.mic_auto_gain),
+                set_value=lambda val: self.state.persist_mic_gain(float(val)),
+                icon="mdi:microphone-plus",
+            )
+            self.state.entities.append(self.state.mic_gain_entity)
+        elif self.state.mic_gain_entity not in self.state.entities:
+            self.state.entities.append(self.state.mic_gain_entity)
+
+        self.state.mic_gain_entity.server = self
+        self.state.mic_gain_entity.update_get_value(lambda: float(self.state.mic_auto_gain))
+        self.state.mic_gain_entity.update_set_value(lambda val: self.state.persist_mic_gain(float(val)))  # type: ignore[arg-type]
+        self.state.mic_gain_entity.sync_with_state()
+
+        # Mic Noise Suppression
+        _NOISE_OPTIONS = ["Off", "Low", "Medium", "High", "Max"]
+        _NOISE_TO_INT = {label: i for i, label in enumerate(_NOISE_OPTIONS)}
+
+        def _get_noise_label() -> str:
+            return _NOISE_OPTIONS[max(0, min(4, self.state.mic_noise_suppression))]
+
+        def _set_noise_label(label: Union[float, str]) -> None:
+            self.state.persist_mic_noise(float(_NOISE_TO_INT.get(str(label), 0)))
+
+        if self.state.mic_noise_suppression_entity is None:
+            self.state.mic_noise_suppression_entity = MicSettingEntity(
+                server=self,
+                key=len(self.state.entities),
+                name="Mic Noise Suppression",
+                object_id="mic_noise",
+                options=_NOISE_OPTIONS,
+                get_value=_get_noise_label,
+                set_value=_set_noise_label,
+                icon="mdi:waveform",
+            )
+            self.state.entities.append(self.state.mic_noise_suppression_entity)
+        elif self.state.mic_noise_suppression_entity not in self.state.entities:
+            self.state.entities.append(self.state.mic_noise_suppression_entity)
+
+        self.state.mic_noise_suppression_entity.server = self
+        self.state.mic_noise_suppression_entity.update_get_value(_get_noise_label)
+        self.state.mic_noise_suppression_entity.update_set_value(_set_noise_label)
+        self.state.mic_noise_suppression_entity.sync_with_state()
+
+        # Mic Volume
+        if self.state.mic_volume_entity is None:
+            self.state.mic_volume_entity = MicSettingEntity(
+                server=self,
+                key=len(self.state.entities),
+                name="Mic Volume",
+                object_id="mic_volume",
+                min_value=1.0,
+                max_value=100.0,
+                get_value=lambda: float(self.state.mic_volume),
+                set_value=lambda val: self.state.persist_mic_volume(float(val)),
+                icon="mdi:microphone-settings",
+            )
+            self.state.entities.append(self.state.mic_volume_entity)
+        elif self.state.mic_volume_entity not in self.state.entities:
+            self.state.entities.append(self.state.mic_volume_entity)
+
+        self.state.mic_volume_entity.server = self
+        self.state.mic_volume_entity.update_get_value(lambda: float(self.state.mic_volume))
+        self.state.mic_volume_entity.update_set_value(lambda val: self.state.persist_mic_volume(float(val)))
+
+        # ---- Instance variables ----
 
         self._is_streaming_audio = False
         self._tts_url: Optional[str] = None
@@ -380,23 +467,12 @@ class VoiceSatelliteProtocol(APIServer):
                 mac_address=self.state.mac_address,
                 manufacturer="Open Home Foundation",
                 model="Linux Voice Assistant",
-                voice_assistant_feature_flags=(
-                    VoiceAssistantFeature.VOICE_ASSISTANT
-                    | VoiceAssistantFeature.API_AUDIO
-                    | VoiceAssistantFeature.ANNOUNCE
-                    | VoiceAssistantFeature.START_CONVERSATION
-                    | VoiceAssistantFeature.TIMERS
-                ),
+                voice_assistant_feature_flags=self.supported_features,
             )
 
         elif isinstance(
             msg,
-            (
-                ListEntitiesRequest,
-                SubscribeHomeAssistantStatesRequest,
-                MediaPlayerCommandRequest,
-                SwitchCommandRequest,
-            ),
+            (ListEntitiesRequest, SubscribeHomeAssistantStatesRequest, MediaPlayerCommandRequest, SwitchCommandRequest, NumberCommandRequest, SelectCommandRequest),
         ):
             for entity in self.state.entities:
                 yield from entity.handle_message(msg)
@@ -500,11 +576,31 @@ class VoiceSatelliteProtocol(APIServer):
 
     def wakeup(self, wake_word: Union[MicroWakeWord, OpenWakeWord]) -> None:
         if self._timer_finished:
+            # Stop the ringing timer, then start a normal wake-up after a short
+            # delay so the transition doesn't feel abrupt.
             # Wake word press while timer is ringing dismisses the timer
             self._timer_finished = False
+            self._timer_ring_start = None
+            self.state.active_wake_words.discard(self.state.stop_word.id)
             self.unduck()
             self.state.tts_player.stop()
-            _LOGGER.debug("Stopping timer finished sound")
+            _LOGGER.debug("Stopping timer finished sound; will wake up in 1 s")
+
+            wake_word_phrase = wake_word.wake_word  # type: ignore
+
+            def _delayed_wakeup() -> None:
+                if self.state.muted or self._pipeline_active:
+                    _LOGGER.debug("Delayed wakeup skipped (muted=%s, pipeline_active=%s)", self.state.muted, self._pipeline_active)
+                    return
+                _LOGGER.debug("Delayed wakeup: playing wakeup sound for %s", wake_word_phrase)
+                self._pipeline_active = True
+                self.duck()
+                self.state.tts_player.play(
+                    self.state.wakeup_sound,
+                    done_callback=lambda: self._on_wakeup_sound_finished(wake_word_phrase),
+                )
+
+            threading.Timer(0.1, _delayed_wakeup).start()
             return
 
         if self.state.muted:
@@ -605,6 +701,20 @@ class VoiceSatelliteProtocol(APIServer):
         self._emit(LVAEvent.TTS_SPEAKING)
         self.state.tts_player.play(self._tts_url, done_callback=self._tts_finished)
 
+    def duck(self) -> None:
+        _LOGGER.debug("Ducking music")
+        self.state.music_player.duck()
+        # Also duck SendSpin streaming audio
+        if self.state.sendspin_bridge:
+            self.state.sendspin_bridge.duck()
+
+    def unduck(self) -> None:
+        _LOGGER.debug("Unducking music")
+        self.state.music_player.unduck()
+        # Also unduck SendSpin streaming audio
+        if self.state.sendspin_bridge:
+            self.state.sendspin_bridge.unduck()
+
     def _tts_finished(self) -> None:
         self._pipeline_active = False
         self.state.active_wake_words.discard(self.state.stop_word.id)
@@ -702,6 +812,15 @@ class VoiceSatelliteProtocol(APIServer):
 
         if self.state.mute_switch_entity is not None:
             self.state.mute_switch_entity.sync_with_state()
+
+        if self.state.mic_gain_entity is not None:
+            self.state.mic_gain_entity.sync_with_state()
+
+        if self.state.mic_noise_suppression_entity is not None:
+            self.state.mic_noise_suppression_entity.sync_with_state()
+
+        if self.state.mic_volume_entity is not None:
+            self.state.mic_volume_entity.sync_with_state()
 
         # Notify peripheral container that HA is no longer reachable
         self._emit(LVAEvent.ERROR, {"reason": "ha_disconnected"})

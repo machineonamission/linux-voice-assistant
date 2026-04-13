@@ -30,9 +30,12 @@ dependencies = [
     "pyopen-wakeword>=1,<2",
     "python-mpv>=1,<2",
     "zeroconf<1",
+    "aiosendspin~=3.0",
+    "sounddevice>=0.4,<1",
     "getmac<1",
     "types-protobuf",
     "websockets>=16.0",
+    "webrtc_noise_gain",
 ]
 dynamic = ["version"]
 
@@ -46,6 +49,9 @@ dev = [
     "isort",
     "autopep8",
 ]
+
+[project.scripts]
+linux-voice-assistant = "linux_voice_assistant.__main__:run"
 
 [project.urls]
 "Source Code" = "http://github.com/OHF-Voice/linux-voice-assistant"

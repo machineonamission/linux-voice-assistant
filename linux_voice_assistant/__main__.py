@@ -27,6 +27,7 @@ from .util import (
     get_esphome_version,
     get_version,
 )
+from .webrtc import WebRTCProcessor
 from .zeroconf import HomeAssistantZeroconf
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,13 +62,15 @@ async def main() -> None:
     )
     parser.add_argument(
         "--audio-output-device",
-        help="Name for the audio output device (see --list-output-devices)",
+        help="Name for the audio output device (see --list-output-devices). SendSpin will auto-match to sounddevice.",
     )
     parser.add_argument(
         "--list-output-devices",
         action="store_true",
         help="List audio output devices and exit",
     )
+    parser.add_argument("--mic-auto-gain", type=int, default=0, choices=list(range(32)))
+    parser.add_argument("--mic-noise-suppression", type=int, default=0, choices=(0, 1, 2, 3, 4))
     parser.add_argument(
         "--wake-word-dir",
         default=[_WAKEWORDS_DIR],
@@ -201,6 +204,27 @@ async def main() -> None:
              "'pipewire' requires wpctl, but in general interfaces with USB audio devices and pipewire better. "
              "Defaults to 'mpv'. Must be 'mpv' or 'pipewire'.",
     )
+    #
+    # SendSpin client options
+    parser.add_argument(
+        "--sendspin-url",
+        help="SendSpin server WebSocket URL (e.g., ws://192.168.1.100:8928/sendspin)",
+    )
+    parser.add_argument(
+        "--sendspin-client-id",
+        help="Unique identifier for SendSpin client (default: linux-voice-assistant-<hostname>)",
+    )
+    parser.add_argument(
+        "--sendspin-static-delay-ms",
+        type=float,
+        default=0.0,
+        help="Static playback delay in milliseconds for SendSpin sync adjustment",
+    )
+    parser.add_argument(
+        "--output-only",
+        action="store_true",
+        help="Enable output only mode",
+    )
     args = parser.parse_args()
 
     if args.list_input_devices:
@@ -211,6 +235,8 @@ async def main() -> None:
         return
 
     if args.list_output_devices:
+        from .audio_device_util import list_output_devices
+        list_output_devices()
         from mpv import MPV
 
         player = MPV()
@@ -335,6 +361,19 @@ async def main() -> None:
     if args.enable_thinking_sound:
         preferences.thinking_sound = 1
 
+    if args.mic_auto_gain or args.mic_noise_suppression:
+        try:
+            import webrtc_noise_gain  # type: ignore[import-untyped] # noqa: F401
+        except ImportError:
+            _LOGGER.exception("Extras for webrtc are not installed")
+            sys.exit(1)
+
+    if args.mic_auto_gain > 0:
+        preferences.mic_auto_gain = args.mic_auto_gain
+
+    if args.mic_noise_suppression > 0:
+        preferences.mic_noise_suppression = args.mic_noise_suppression
+
     # Load wake/stop models
     active_wake_words: Set[str] = set()
     wake_models: Dict[str, Union[MicroWakeWord, OpenWakeWord]] = {}
@@ -398,15 +437,19 @@ async def main() -> None:
         preferences=preferences,
         preferences_path=preferences_path,
         refractory_seconds=args.refractory_seconds,
+        output_only=args.output_only,
         download_dir=args.download_dir,
         volume=initial_volume,
+        mic_volume=preferences.mic_volume,
+        mic_auto_gain=preferences.mic_auto_gain,
+        mic_noise_suppression=preferences.mic_noise_suppression,
         timer_max_ring_seconds=args.timer_max_ring_seconds,
         listen_during_wake_sound=args.listen_during_wake_sound,
         volume_controller=args.volume_controller,
         audio_output_device=args.audio_output_device
     )
 
-    if args.enable_thinking_sound:
+    if args.enable_thinking_sound or args.mic_auto_gain or args.mic_noise_suppression:
         state.save_preferences()
 
     initial_volume_percent = int(round(initial_volume * 100))
@@ -478,6 +521,32 @@ async def main() -> None:
     )
     process_audio_thread.start()
 
+    vsp = VoiceSatelliteProtocol(state)
+    # Initialize SendSpin bridge if URL provided
+    if args.sendspin_url:
+        from .sendspin_bridge import SendspinBridge
+        from .audio_device_util import find_sounddevice_by_name
+
+        # Resolve MPV device name to sounddevice index
+        sounddevice_index = find_sounddevice_by_name(args.audio_output_device)
+
+        vsp.state.sendspin_bridge = SendspinBridge(
+            media_player_entity=vsp.state.media_player_entity,
+            client_id=args.sendspin_client_id,
+            client_name=args.name,
+            static_delay_ms=args.sendspin_static_delay_ms,
+            audio_device=sounddevice_index,
+        )
+        # Wire up the bridge to the entity for coordinated playback
+        vsp.state.media_player_entity.set_sendspin_bridge(state.sendspin_bridge)
+        await vsp.state.sendspin_bridge.start(server_url=args.sendspin_url)
+
+    loop = asyncio.get_running_loop()
+    server = await loop.create_server(
+        lambda: vsp, host=args.host, port=args.port
+        lambda: VoiceSatelliteProtocol(state), host=host_ip_address, port=args.port
+    )
+
     # Auto discovery (zeroconf, mDNS)
     discovery = HomeAssistantZeroconf(
         port=args.port,
@@ -505,6 +574,10 @@ async def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        # Stop SendSpin bridge
+        if state.sendspin_bridge:
+            await state.sendspin_bridge.disconnect()
+
         state.audio_queue.put_nowait(None)
         process_audio_thread.join()
         if peripheral_api is not None:
@@ -528,17 +601,16 @@ def process_audio(state: ServerState, mic, block_size: int):
     has_oww = False
 
     last_active: Optional[float] = None
+    webrtc: Optional[WebRTCProcessor] = None
 
     try:
         _LOGGER.debug("Opening audio input device: %s", mic.name)
         with mic.recorder(samplerate=16000, channels=1, blocksize=block_size) as mic_in:
             while True:
                 audio_chunk_array = mic_in.record(block_size).reshape(-1)
-                audio_chunk = (
-                    (np.clip(audio_chunk_array, -1.0, 1.0) * 32767.0)
-                    .astype("<i2")  # little-endian 16-bit signed
-                    .tobytes()
-                )
+                # little-endian 16-bit signed
+                mic_vol_scalar = max(0.1, min(1.0, state.mic_volume / 100.0))
+                audio_chunk = (np.clip(audio_chunk_array * mic_vol_scalar, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
                 if state.satellite is None:
                     continue
@@ -563,6 +635,18 @@ def process_audio(state: ServerState, mic, block_size: int):
                     if has_oww and (oww_features is None):
                         oww_features = OpenWakeWordFeatures.from_builtin()
 
+                agc = state.preferences.mic_auto_gain or 0
+                ns = state.preferences.mic_noise_suppression or 0
+
+                if agc > 0 or ns > 0:
+                    if webrtc is None:
+                        webrtc = WebRTCProcessor(agc_level=agc, ns_level=ns)
+                    else:
+                        webrtc.update_settings(agc, ns)
+                    audio_chunk = webrtc.process(audio_chunk)
+                    if not audio_chunk:
+                        continue
+
                 try:
                     state.satellite.handle_audio(audio_chunk)
 
@@ -584,7 +668,7 @@ def process_audio(state: ServerState, mic, block_size: int):
                         elif isinstance(wake_word, OpenWakeWord):
                             for oww_input in oww_inputs:
                                 for prob in wake_word.process_streaming(oww_input):
-                                    if prob > 0.5:
+                                    if prob > 0.995:
                                         activated = True
 
                         if activated and not state.muted:
@@ -595,7 +679,6 @@ def process_audio(state: ServerState, mic, block_size: int):
                             ):
                                 state.satellite.wakeup(wake_word)
                                 last_active = now
-
                     # Always process to keep state correct
                     stopped = False
                     for micro_input in micro_inputs:
@@ -614,5 +697,10 @@ def process_audio(state: ServerState, mic, block_size: int):
 
 # -----------------------------------------------------------------------------
 
-if __name__ == "__main__":
+
+def run():
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()
