@@ -544,7 +544,6 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     server = await loop.create_server(
         lambda: vsp, host=args.host, port=args.port
-        lambda: VoiceSatelliteProtocol(state), host=host_ip_address, port=args.port
     )
 
     # Auto discovery (zeroconf, mDNS)
