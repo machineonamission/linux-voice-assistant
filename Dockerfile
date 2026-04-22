@@ -42,6 +42,7 @@ RUN apt-get update && \
     vim \
     procps  \
     wireplumber \
+    libportaudio2 \
     && \
 apt-get clean
 
