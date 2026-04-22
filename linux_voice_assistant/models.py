@@ -135,6 +135,8 @@ class ServerState:
     mic_volume: int = 100  # 1–100, default maximum
     timer_max_ring_seconds: float = 900.0
     listen_during_wake_sound: bool = False
+    volume_controller: str = "mpv"
+    audio_output_device: Optional[str] = None
 
     def save_preferences(self) -> None:
         """Save preferences as JSON."""

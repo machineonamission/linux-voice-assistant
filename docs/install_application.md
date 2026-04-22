@@ -279,13 +279,13 @@ The following variables can be configured in the `.env` or in the service file:
 | `PROCESSING_SOUND` | `sounds/processing.wav` | Sound file for processing state |
 | `LISTEN_DURING_WAKE_SOUND` | false | Set to "1" to start listening immediately after wake word detection, without waiting for the wake sound to finish |
 | `MUTE_SOUND` | `sounds/mute_switch_on.flac` | Sound file for mute on |
-| `UNMUTE_SOUND` | `sounds/mute_switch_off.flac` | Sound file for Configure Audio Devices
+| `UNMUTE_SOUND` | `sounds/mute_switch_off.flac` | Sound file for Configure Audio Devices |
 | `PERIPHERAL_HOST` | 0.0.0.0 | Host for the peripheral WebSocket API |
 | `PERIPHERAL_PORT` | 6055 | Port for the peripheral WebSocket API |
 | `PERIPHERAL_VOLUME_STEP` | %(default)s | Volume change per button press |
 | `DISABLE_PERIPHERAL_API` | false | Disable the peripheral WebSocket API |
 | `ENABLE_OUTPUT_ONLY` | (optional) | Set to "1" to enable output-only mode |
-
+| `VOLUME_CONTROLLER` | `mpv` | Which program handles the master volume control. See [Additional Audio Settings](docs/additional_audio_settings.md#pipewire-based-volume-control) |
 
 💡 **Note:** For the systemd installation some variables set in the service need to be without `LVA_` prefix.
 

@@ -213,10 +213,19 @@ async def main() -> None:
         type=float,
         default=0.0,
         help="Static playback delay in milliseconds for SendSpin sync adjustment",
+    )
     parser.add_argument(
         "--output-only",
         action="store_true",
         help="Enable output only mode",
+    )
+    parser.add_argument(
+        "--volume-controller",
+        choices=["mpv", "pipewire"],
+        default="mpv",
+        help="Which program handles the master volume control. 'mpv' is old default, and compatible. "
+             "'pipewire' requires wpctl, but in general interfaces with USB audio devices and pipewire better. "
+             "Defaults to 'mpv'. Must be 'mpv' or 'pipewire'.",
     )
     args = parser.parse_args()
 
@@ -382,6 +391,8 @@ async def main() -> None:
         mic_noise_suppression=preferences.mic_noise_suppression,
         timer_max_ring_seconds=args.timer_max_ring_seconds,
         listen_during_wake_sound=args.listen_during_wake_sound,
+        volume_controller=args.volume_controller,
+        audio_output_device=args.audio_output_device
     )
 
     if fallback_used:
@@ -502,8 +513,7 @@ async def main() -> None:
 
     loop = asyncio.get_running_loop()
     server = await loop.create_server(
-        lambda: vsp, host=args.host, port=args.port
-        lambda: VoiceSatelliteProtocol(state), host=host_ip_address, port=args.port
+        lambda: vsp, host=host_ip_address, port=args.port
     )
 
     # Auto discovery (zeroconf, mDNS)
