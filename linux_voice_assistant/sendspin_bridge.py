@@ -118,7 +118,7 @@ class AudioPlayer:
     _CORRECTION_TARGET_SECONDS: Final[float] = 2.0
 
     # Audio stream configuration
-    _BLOCKSIZE: Final[int] = 2048  # ~46ms at 44.1kHz
+    _BLOCKSIZE: Final[int] = 8192  # ~46ms at 44.1kHz
 
     # Time synchronization thresholds
     _EARLY_START_THRESHOLD_US: Final[int] = 700_000  # 700ms
