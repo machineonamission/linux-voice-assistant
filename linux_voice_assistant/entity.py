@@ -101,10 +101,13 @@ class MediaPlayerEntity(ESPHomeEntity):
         if hasattr(self.server, "state") and self.server.state.volume_controller in ["pipewire", "pulseaudio"]:
             asyncio.get_running_loop().create_task(self.volume_monitor_loop())
 
+    def pa_sink(self):
+        return self.server.state.audio_output_device or "@DEFAULT_SINK@"
+
     async def pw_vol(self):
         # a bit verbose but otherwise robust and awk/grep/regex-less
         # no get-sink-volume does not support -f json, otherwise i would have DONE that
-        def_sink = await get_stdout("pactl", "get-default-sink")
+        def_sink = self.server.state.audio_output_device or await get_stdout("pactl", "get-default-sink")
         sinks = json.loads(await get_stdout("pactl", "-f", "json", "list", "sinks"))
 
         def_sink_info = None
@@ -120,10 +123,20 @@ class MediaPlayerEntity(ESPHomeEntity):
         for volume in def_sink_info["volume"].values():
             volumes.append(float(volume["value_percent"].replace("%", "")))
 
+        mute = def_sink_info["mute"]
 
         vol = sum(volumes) / len(volumes)
 
-        return vol
+        return vol, mute
+
+    def pw_set_mute(self, muted: bool):
+        subprocess.run(
+            ["pactl", "set-sink-mute", self.pa_sink(), str(int(muted))],
+            check=True,
+            capture_output=False,
+            text=True,
+            timeout=1
+        )
 
     async def volume_monitor_loop(self):
         while True:
@@ -142,10 +155,12 @@ class MediaPlayerEntity(ESPHomeEntity):
 
                     if line.get("event") == "change" and line.get("on") == "sink":
                         self._log.debug(f"pactl subscribe event {line}")
-                        volume = await self.pw_vol()
+                        volume, muted = await self.pw_vol()
+
                         self._log.debug(f"new volume: {volume}")
 
                         normalized = max(0.0, min(1.0, float(volume)))
+                        self.muted = muted
 
                         self.volume = normalized
                         self.previous_volume = normalized
@@ -170,7 +185,7 @@ class MediaPlayerEntity(ESPHomeEntity):
                     # vol_percent = f"{int(round(volume * 100))}%"
                     self._log.debug("pactl start")
                     res = subprocess.run(
-                        ["pactl", "set-sink-volume", self.server.state.audio_output_device or "@DEFAULT_SINK@", str(volume)],
+                        ["pactl", "set-sink-volume", self.pa_sink(), str(volume)],
                         check=False,
                         capture_output=True,
                         text=True,
@@ -191,10 +206,10 @@ class MediaPlayerEntity(ESPHomeEntity):
             self.announce_player.set_volume(percent)
 
     def play(
-        self,
-        url: Union[str, List[str]],
-        announcement: bool = False,
-        done_callback: Optional[Callable[[], None]] = None,
+            self,
+            url: Union[str, List[str]],
+            announcement: bool = False,
+            done_callback: Optional[Callable[[], None]] = None,
     ) -> Iterable[message.Message]:
         if announcement:
             self._log.debug("PLAY: announcement true")
@@ -268,6 +283,7 @@ class MediaPlayerEntity(ESPHomeEntity):
                         self.previous_volume = self.volume
                         self.set_volume(0)
                         self.muted = True
+                        self.pw_set_mute(True)
                     yield self._update_state(self.state)
 
                 elif command == MediaPlayerCommand.UNMUTE:
@@ -275,6 +291,7 @@ class MediaPlayerEntity(ESPHomeEntity):
                     if self.muted:
                         self.set_volume(self.previous_volume)
                         self.muted = False
+                        self.pw_set_mute(False)
                     yield self._update_state(self.state)
 
             elif msg.has_volume:
@@ -729,6 +746,5 @@ __all__ = [
 
 WakeWordSensitivityNumberEntity = WakeWord1SensitivityNumberEntity
 SecondWakeWordSensitivityNumberEntity = WakeWord2SensitivityNumberEntity
-
 
 # -----------------------------------------------------------------------------
